@@ -49,8 +49,16 @@ def cv_imread(file_path):
 def cv_imwrite(file_path, img):
     cv2.imencode('.png', img)[1].tofile(file_path)
 
-def normalize_text(text):
-    return re.sub(r'[^\w\u4e00-\u9fa5]', '', text).lower()
+# ================= 核心：精准过滤，严格保留大小写 =================
+def normalize_text(text, mode="fuzzy"):
+    cleaned = re.sub(r'[^\w\u4e00-\u9fa5]', '', text)
+    if mode == "exact":
+        # 精确模式：绝对保留原始大小写形态
+        return cleaned
+    else:
+        # 模糊模式：全部转小写，忽略大小写差异
+        return cleaned.lower()
+# ==============================================================
 
 def convert_ppt_to_images(ppt_path, output_dir):
     img_paths = []
@@ -61,15 +69,12 @@ def convert_ppt_to_images(ppt_path, output_dir):
         ppt_abs_path = os.path.abspath(ppt_path)
         deck = powerpoint.Presentations.Open(ppt_abs_path, ReadOnly=True, WithWindow=False)
         
-        # ================= 核心升级：读取 PPT 真实比例 =================
         slide_w = deck.PageSetup.SlideWidth
         slide_h = deck.PageSetup.SlideHeight
         ratio = slide_w / slide_h if slide_h else 16/9
         
-        # 锁定 4K 级别高度，动态计算原生宽度，彻底消灭拉伸变形！
         export_h = 2160
         export_w = int(export_h * ratio)
-        # ===============================================================
 
         for i in range(1, deck.Slides.Count + 1):
             out_name = f"temp_slide_{i}_{os.path.basename(ppt_path)}.png"
@@ -127,13 +132,14 @@ def group_texts(res_list, merge_radius):
     return clusters
 
 def calculate_similarity_for_pairing(resA, resB):
-    setA = set([normalize_text(item.get('words', '')) for item in resA])
-    setB = set([normalize_text(item.get('words', '')) for item in resB])
+    # 配对找兄弟时，为了防止因为大小写变了而找不到对象，强制用模糊模式对比
+    setA = set([normalize_text(item.get('words', ''), "fuzzy") for item in resA])
+    setB = set([normalize_text(item.get('words', ''), "fuzzy") for item in resB])
     if not setA and not setB: return 0
     return len(setA & setB) / len(setA | setB)
 
 def auto_compare(input_data, mode):
-    print(f"当前比对模式：{'[精确找茬]' if mode == 'exact' else '[模糊找茬]'}")
+    print(f"当前比对模式：{'[精确找茬 - 严格区分大小写]' if mode == 'exact' else '[模糊找茬]'}")
 
     if isinstance(input_data, list):
         output_dir = os.path.dirname(input_data[0]) if input_data else ""
@@ -231,39 +237,35 @@ def auto_compare(input_data, mode):
         candidate_matches = []
         max_dist_norm = 0.15 
         
-        # ================= 核心升级：相对坐标系匹配 =================
         for i_B, cB in enumerate(clustersB):
-            norm_B = normalize_text(cB['words'])
+            norm_B = normalize_text(cB['words'], mode)
             if not norm_B: continue
             
-            # 将 B 图坐标转换为 0~1 的比例，无视图纸绝对尺寸差异
             cx_B_norm = cB['cx'] / wB
             cy_B_norm = cB['cy'] / hB
                 
             for i_A, cA in enumerate(clustersA):
-                norm_A = normalize_text(cA['words'])
+                norm_A = normalize_text(cA['words'], mode)
                 if not norm_A: continue
                 
-                # 将 A 图坐标转换为 0~1 的比例
                 cx_A_norm = cA['cx'] / wA
                 cy_A_norm = cA['cy'] / hA
                 
                 similarity = difflib.SequenceMatcher(None, norm_A, norm_B).ratio()
                 is_match = False
                 
+                # ================= 终极重拳出击 =================
                 if mode == "exact":
-                    if len(norm_B) <= 5:
-                        is_match = (norm_A == norm_B)
-                    else:
-                        is_match = (similarity >= 0.88)
+                    # 彻底取消长句容错，只认 100% 绝对死理！App 和 APP 就是不一样！
+                    is_match = (norm_A == norm_B)
                 else:
                     is_match = (similarity >= 0.75)
+                # ================================================
                 
                 if is_match:
                     dist_norm = math.hypot(cx_B_norm - cx_A_norm, cy_B_norm - cy_A_norm)
                     if dist_norm < max_dist_norm:
                         candidate_matches.append((similarity, -dist_norm, i_A, i_B))
-        # ==============================================================
                     
         candidate_matches.sort(key=lambda x: (x[0], x[1]), reverse=True)
         matched_A_indices, matched_B_indices = set(), set()
@@ -284,7 +286,7 @@ def auto_compare(input_data, mode):
         diff_count_B = diff_count_A = 0
         
         for i_B, cB in enumerate(clustersB):
-            if i_B not in matched_B_indices and normalize_text(cB['words']):
+            if i_B not in matched_B_indices and normalize_text(cB['words'], mode):
                 left = int(cB['left'] * scale_B)
                 top = int(cB['top'] * scale_B)
                 right = int(cB['right'] * scale_B)
@@ -293,7 +295,7 @@ def auto_compare(input_data, mode):
                 diff_count_B += 1
 
         for i_A, cA in enumerate(clustersA):
-            if i_A not in matched_A_indices and normalize_text(cA['words']):
+            if i_A not in matched_A_indices and normalize_text(cA['words'], mode):
                 left = int(cA['left'] * scale_A)
                 top = int(cA['top'] * scale_A)
                 right = int(cA['right'] * scale_A)
@@ -326,7 +328,7 @@ class RedirectText(object):
 def start_gui():
     global selected_files_list
     root = tk.Tk()
-    root.title("展览图纸本地核对神器 (防拉伸变形版)")
+    root.title("展览图纸本地核对神器 (大小写绝对敏感版)")
     root.geometry("650x550")
     root.configure(bg="#f0f0f0")
 
@@ -366,10 +368,10 @@ def start_gui():
 
     compare_mode = tk.StringVar(value="exact")
 
-    rb_exact = ttk.Radiobutton(frame_mode, text="精确匹配：短句(数字/词语)修改绝对抓出！已修复相同字误报问题。", variable=compare_mode, value="exact")
+    rb_exact = ttk.Radiobutton(frame_mode, text="精确匹配：极度严苛，只要有一个字母大小写不同，立刻标红！", variable=compare_mode, value="exact")
     rb_exact.pack(anchor="w", padx=10, pady=8)
 
-    rb_fuzzy = ttk.Radiobutton(frame_mode, text="模糊匹配：允许大段落排版变动、错别字较多时的粗略核对。", variable=compare_mode, value="fuzzy")
+    rb_fuzzy = ttk.Radiobutton(frame_mode, text="模糊匹配：忽略大小写差异，允许大段落错别字时的粗略核对。", variable=compare_mode, value="fuzzy")
     rb_fuzzy.pack(anchor="w", padx=10, pady=8)
 
     def run_compare():
